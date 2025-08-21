@@ -1,0 +1,217 @@
+{% include 'layout.html' %}
+
+<div class="container mt-5">
+  <h3>Add input to chat with personal chatbot</h3>
+
+  <!-- Options de test -->
+  <div class="mb-3">
+    <label for="wsEndpoint">WebSocket Endpoint:</label>
+    <select id="wsEndpoint" class="form-select">
+      <option value="/ws">Normal (/ws)</option>
+      <option value="/ws-async">Async (/ws-async)</option>
+      <option value="/ws-test">Test Simulé (/ws-test)</option>
+    </select>
+  </div>
+
+  <div>
+    <div class="card text-center mt-3">
+      <div class="card-header">
+        Chat History: <span id="connectionStatus" class="badge bg-secondary">Disconnected</span>
+        <span id="chunkCounter" class="badge bg-info ms-2">Chunks: 0</span>
+      </div>
+      <div class="card-body" id="chatHistory" style="max-height: 500px; overflow-y: auto;">
+        {% for message in chat_responses %}
+          {% if loop.index0 % 2 == 0 %}
+            <div class="chat-message user">{{ message }}</div>
+          {% else %}
+            <div class="chat-message assistant">{{ message }}</div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="container" id="footer">
+    <div class="input-group mb-3">
+      <input class="form-control" placeholder="Add input here" id="userInput">
+      <button class="btn btn-outline-primary" type="button" id="sendButton">Send</button>
+      <button class="btn btn-outline-secondary" type="button" id="reconnectButton">Reconnect</button>
+    </div>
+    <!-- Debug info -->
+    <div id="debugInfo" class="text-muted small"></div>
+  </div>
+</div>
+
+<style>
+.chat-message {
+  margin: 10px 0;
+  padding: 10px;
+  border-radius: 10px;
+  max-width: 80%;
+}
+.chat-message.user {
+  background-color: #007bff;
+  color: white;
+  margin-left: auto;
+  text-align: right;
+}
+.chat-message.assistant {
+  background-color: #f8f9fa;
+  color: #333;
+  border: 1px solid #dee2e6;
+  text-align: left;
+}
+.error { color: #dc3545; font-weight: bold; }
+#chatHistory { text-align: left; }
+.streaming { border-left: 3px solid #28a745; }
+</style>
+
+<script>
+  var ws;
+  var sendButton = document.getElementById("sendButton");
+  var userInput = document.getElementById("userInput");
+  var chatHistory = document.getElementById("chatHistory");
+  var connectionStatus = document.getElementById("connectionStatus");
+  var chunkCounter = document.getElementById("chunkCounter");
+  var debugInfo = document.getElementById("debugInfo");
+  var wsEndpoint = document.getElementById("wsEndpoint");
+  var reconnectButton = document.getElementById("reconnectButton");
+  
+  var currentAssistantDiv = null;
+  var isWaitingForResponse = false;
+  var totalChunks = 0;
+  var startTime = 0;
+
+  function connectWebSocket() {
+    var endpoint = wsEndpoint.value;
+    var websocketString = '';
+    
+    if (window.location.hostname === '127.0.0.1') {
+      websocketString = `ws://localhost:8000${endpoint}`;
+    } else {
+      websocketString = `wss://${window.location.hostname}${endpoint}`;
+    }
+
+    console.log('Connecting to:', websocketString);
+    ws = new WebSocket(websocketString);
+
+    ws.onopen = function(event) {
+      console.log('WebSocket connected');
+      connectionStatus.textContent = 'Connected';
+      connectionStatus.className = 'badge bg-success';
+    };
+
+    ws.onmessage = function(event) {
+      var receiveTime = new Date().toISOString();
+      console.log(`Message received at ${receiveTime}:`, event.data);
+      
+      try {
+        var data = JSON.parse(event.data);
+        
+        switch(data.type) {
+          case 'chunk':
+            if (!currentAssistantDiv) {
+              currentAssistantDiv = document.createElement("div");
+              currentAssistantDiv.className = "chat-message assistant streaming";
+              currentAssistantDiv.textContent = "";
+              chatHistory.appendChild(currentAssistantDiv);
+              startTime = Date.now();
+              totalChunks = 0;
+            }
+            
+            totalChunks++;
+            chunkCounter.textContent = `Chunks: ${totalChunks}`;
+            
+            currentAssistantDiv.textContent += data.content;
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+            
+            // Debug info
+            var elapsed = Date.now() - startTime;
+            debugInfo.innerHTML = `Chunk ${data.chunk_id || totalChunks} | Elapsed: ${elapsed}ms | Content: "${data.content.substring(0, 20)}..."`;
+            break;
+            
+          case 'end':
+            if (currentAssistantDiv) {
+              currentAssistantDiv.classList.remove('streaming');
+            }
+            currentAssistantDiv = null;
+            isWaitingForResponse = false;
+            sendButton.disabled = false;
+            sendButton.textContent = 'Send';
+            
+            var totalTime = Date.now() - startTime;
+            debugInfo.innerHTML = `✅ Completed in ${totalTime}ms | Total chunks: ${data.total_chunks || totalChunks}`;
+            console.log('Response completed:', data);
+            break;
+            
+          case 'error':
+            if (currentAssistantDiv) {
+              currentAssistantDiv.innerHTML = `<span class="error">${data.message}</span>`;
+              currentAssistantDiv.classList.remove('streaming');
+            }
+            currentAssistantDiv = null;
+            isWaitingForResponse = false;
+            sendButton.disabled = false;
+            sendButton.textContent = 'Send';
+            debugInfo.innerHTML = `❌ Error: ${data.message}`;
+            break;
+        }
+      } catch (error) {
+        console.error('Error parsing JSON:', error);
+        debugInfo.innerHTML = `❌ JSON Parse Error: ${error.message}`;
+      }
+    };
+
+    ws.onerror = function(error) {
+      console.error('WebSocket error:', error);
+      connectionStatus.textContent = 'Error';
+      connectionStatus.className = 'badge bg-danger';
+      debugInfo.innerHTML = `❌ WebSocket error`;
+    };
+
+    ws.onclose = function(event) {
+      console.log('WebSocket closed');
+      connectionStatus.textContent = 'Disconnected';
+      connectionStatus.className = 'badge bg-secondary';
+      isWaitingForResponse = false;
+      sendButton.disabled = false;
+      sendButton.textContent = 'Send';
+    };
+  }
+
+  function sendMessage() {
+    var message = userInput.value.trim();
+    if (message && !isWaitingForResponse && ws.readyState === WebSocket.OPEN) {
+      var userInputDiv = document.createElement("div");
+      userInputDiv.className = "chat-message user";
+      userInputDiv.textContent = message;
+      chatHistory.appendChild(userInputDiv);
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+
+      ws.send(message);
+      userInput.value = "";
+      
+      isWaitingForResponse = true;
+      sendButton.disabled = true;
+      sendButton.textContent = 'Sending...';
+      currentAssistantDiv = null;
+      totalChunks = 0;
+      chunkCounter.textContent = 'Chunks: 0';
+      debugInfo.innerHTML = '⏳ Waiting for response...';
+    }
+  }
+
+  // Event listeners
+  sendButton.onclick = sendMessage;
+  reconnectButton.onclick = connectWebSocket;
+  wsEndpoint.onchange = connectWebSocket;
+
+  userInput.addEventListener("keypress", function(event) {
+    if (event.key === "Enter" && !isWaitingForResponse) {
+      sendMessage();
+    }
+  });
+
+  // Connexion initiale
+  connectWebSocket();
+</script>
